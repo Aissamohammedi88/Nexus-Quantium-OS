@@ -1,0 +1,1331 @@
+#!/usr/bin/env bash
+
+# ═══════════════════════════════════════════════════════════════════════════
+
+# ❄⚡ NEXUS OS — FUSION NixOS × Arch Linux → CLÉ USB BOOTABLE
+
+# ═══════════════════════════════════════════════════════════════════════════
+
+# Crée une clé USB bootable contenant NixOS + Arch Linux fusionnés
+
+# avec un menu de démarrage Nexus personnalisé (GRUB)
+
+#
+
+# Auteur : Aissa Mohammedi (DGK)
+
+#
+
+# ⚠️  ATTENTION : Ce script ÉCRIT sur un disque. Vérifie 2x le device !
+
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+
+set -euo pipefail
+
+
+
+# ═══════════════════════════════════════════════════════════════════
+
+# COULEURS
+
+# ═══════════════════════════════════════════════════════════════════
+
+G='\033[92m'; Y='\033[93m'; R='\033[91m'; C='\033[96m'; M='\033[95m'; B='\033[1m'; N='\033[0m'
+
+info()  { echo -e "${G}[✅]${N} $*"; }
+
+warn()  { echo -e "${Y}[⚠️ ]${N} $*"; }
+
+err()   { echo -e "${R}[❌]${N} $*"; }
+
+sec()   { echo -e "\n${C}${B}═══ $* ═══${N}\n"; }
+
+
+
+# ═══════════════════════════════════════════════════════════════════
+
+# CONFIG
+
+# ═══════════════════════════════════════════════════════════════════
+
+WORK_DIR="${HOME}/nexus_os_build"
+
+ISO_DIR="${WORK_DIR}/isos"
+
+USB_MNT="${WORK_DIR}/usb_mnt"
+
+LOG_FILE="${WORK_DIR}/nexus_build.log"
+
+
+
+NIXOS_ISO_URL="https://channels.nixos.org/nixos-24.05/latest-nixos-minimal-x86_64-linux.iso"
+
+ARCH_ISO_URL="https://mirror.rackspace.com/archlinux/iso/latest/archlinux-x86_64.iso"
+
+
+
+mkdir -p "${WORK_DIR}" "${ISO_DIR}"
+
+exec > >(tee -a "${LOG_FILE}") 2>&1
+
+
+
+# ═══════════════════════════════════════════════════════════════════
+
+# BANNIÈRE
+
+# ═══════════════════════════════════════════════════════════════════
+
+banniere() {
+
+cat <<'EOF'
+
+
+
+╔══════════════════════════════════════════════════════════════════════╗
+
+║                                                                      ║
+
+║        ❄  NEXUS OS — NixOS × Arch Linux Fusion  ⚡                   ║
+
+║                                                                      ║
+
+║        Créateur de clé USB bootable multi-distro                     ║
+
+║        Auteur : Aissa Mohammedi (DGK)                                ║
+
+║                                                                      ║
+
+╚══════════════════════════════════════════════════════════════════════╝
+
+
+
+EOF
+
+}
+
+
+
+# ═══════════════════════════════════════════════════════════════════
+
+# VÉRIFICATION ROOT
+
+# ═══════════════════════════════════════════════════════════════════
+
+verifier_root() {
+
+    sec "VÉRIFICATION PRIVILÈGES"
+
+    if [[ $EUID -ne 0 ]]; then
+
+        err "Ce script doit être lancé en ROOT"
+
+        echo ""
+
+        echo "    sudo bash $0"
+
+        echo ""
+
+        exit 1
+
+    fi
+
+    info "Mode ROOT confirmé"
+
+}
+
+
+
+# ═══════════════════════════════════════════════════════════════════
+
+# VÉRIFICATION OUTILS
+
+# ═══════════════════════════════════════════════════════════════════
+
+verifier_outils() {
+
+    sec "VÉRIFICATION DES OUTILS"
+
+    local outils=(wget parted mkfs.vfat mkfs.ext4 mount umount grub-install dd lsblk blkid)
+
+    local manquants=()
+
+    for outil in "${outils[@]}"; do
+
+        if ! command -v "${outil}" >/dev/null 2>&1; then
+
+            manquants+=("${outil}")
+
+        fi
+
+    done
+
+    if [[ ${#manquants[@]} -gt 0 ]]; then
+
+        warn "Outils manquants : ${manquants[*]}"
+
+        echo ""
+
+        echo "  Installation :"
+
+        echo "    Debian/Ubuntu : sudo apt install wget parted dosfstools e2fsprogs grub-pc-bin grub-efi-amd64-bin"
+
+        echo "    Arch          : sudo pacman -S wget parted dosfstools e2fsprogs grub"
+
+        echo "    Fedora        : sudo dnf install wget parted dosfstools e2fsprogs grub2-tools"
+
+        echo ""
+
+        exit 1
+
+    fi
+
+    info "Tous les outils sont présents"
+
+}
+
+
+
+# ═══════════════════════════════════════════════════════════════════
+
+# CHOIX DU DEVICE USB
+
+# ═══════════════════════════════════════════════════════════════════
+
+choisir_device() {
+
+    sec "DISQUES DISPONIBLES"
+
+    lsblk -o NAME,SIZE,TYPE,MOUNTPOINT,MODEL -p
+
+    echo ""
+
+    warn "Vérifie ATTENTIVEMENT le nom EXACT de ta clé USB"
+
+    warn "Ne te trompe PAS de disque — sinon tu effaces tout"
+
+    echo ""
+
+    read -rp "👉 Entre le chemin du DEVICE USBml (ex: /dev/sdb) : " DEVICE
+
+
+
+    if [[ -z "${DEVICE}" ]]; then
+
+        err "Aucun device spécifié"
+
+        exit 1
+
+    fi
+
+
+
+    if [[ ! -b "${DEVICE}" ]]; then
+
+        err "${DEVICE} n'est pas un device bloc valide"
+
+        exit 1
+
+    fi
+
+
+
+    echo ""
+
+    echo -e "${R}${B}⚠️  TU VAS EFFACER TOUT SUR ${DEVICE}${N}"
+
+    lsblk "${DEVICE}"
+
+    echo ""
+
+    read -rp "👉 Tape 'OUI' en majuscules pour confirmer : " confirm
+
+
+
+    if [[ "${confirm}" != "OUI" ]]; then
+
+        err "Annulé"
+
+        exit 1
+
+    fi
+
+
+
+    info "Device confirmé : ${DEVICE}"
+
+}
+
+
+
+# ═══════════════════════════════════════════════════════════════════
+
+# TÉLÉCHARGEMENT DES ISOS
+
+# ═══════════════════════════════════════════════════════════════════
+
+telecharger_isos() {
+
+    sec "TÉLÉCHARGEMENT DES ISOS"
+
+
+
+    local nixos_iso="${ISO_DIR}/nixos-minimal.iso"
+
+    local arch_iso="${ISO_DIR}/archlinux.iso"
+
+
+
+    if [[ ! -f "${nixos_iso}" ]]; then
+
+        info "Téléchargement NixOS 24.05..."
+
+        wget -c --show-progress -O "${nixos_iso}" "${NIXOS_ISO_URL}" || {
+
+            err "Échec téléchargement NixOS"
+
+            exit 1
+
+        }
+
+    else
+
+        info "NixOS ISO déjà présent ($(du -h "${nixos_iso}" | cut -f1))"
+
+    fi
+
+
+
+    if [[ ! -f "${arch_iso}" ]]; then
+
+        info "Téléchargement Arch Linux..."
+
+        wget -c --show-progress -O "${arch_iso}" "${ARCH_ISO_URL}" || {
+
+            err "Échec téléchargement Arch"
+
+            exit 1
+
+        }
+
+    else
+
+        info "Arch ISO déjà présent ($(du -h "${arch_iso}" | cut -f1))"
+
+    fi
+
+
+
+    info "ISOs prêts :"
+
+    info "  NixOS : ${nixos_iso}"
+
+    info "  Arch  : ${arch_iso}"
+
+}
+
+
+
+# ═══════════════════════════════════════════════════════════════════
+
+# FORMATAGE USB — 3 partitions
+
+# ═══════════════════════════════════════════════════════════════════
+
+formater_usb() {
+
+    sec "FORMATAGE DE ${DEVICE}"
+
+
+
+    info "Démontage des partitions..."
+
+    umount "${DEVICE}"* 2>/dev/null || true
+
+
+
+    info "Effacement de la table de partitions..."
+
+    wipefs -a "${DEVICE}" 2>/dev/null || true
+
+
+
+    info "Création table GPT..."
+
+    parted -s "${DEVICE}" mklabel gpt
+
+
+
+    info "Partition 1 : NEXUS-BOOT (FAT32, 2 GB)"
+
+    parted -s "${DEVICE}" mkpart primary fat32 1MiB 2GiB
+
+    parted -s "${DEVICE}" set 1 boot on
+
+    parted -s "${DEVICE}" set 1 esp on
+
+
+
+    info "Partition 2 : NEXUS-NIXOS (ext4, 8 GB)"
+
+    parted -s "${DEVICE}" mkpart primary ext4 2GiB 10GiB
+
+
+
+    info "Partition 3 : NEXUS-ARCH (ext4, 8 GB)"
+
+    parted -s "${DEVICE}" mkpart primary ext4 10GiB 18GiB
+
+
+
+    info "Partition 4 : NEXUS-DATA (ext4, reste)"
+
+    parted -s "${DEVICE}" mkpart primary ext4 18GiB 100%
+
+
+
+    sleep 2
+
+    partprobe "${DEVICE}" 2>/dev/null || true
+
+    sleep 2
+
+
+
+    # Détection nomenclature (sdb1 vs nvme0n1p1)
+
+    local P1="${DEVICE}1" P2="${DEVICE}2" P3="${DEVICE}3" P4="${DEVICE}4"
+
+    [[ -e "${DEVICE}p1" ]] && P1="${DEVICE}p1"
+
+    [[ -e "${DEVICE}p2" ]] && P2="${DEVICE}p2"
+
+    [[ -e "${DEVICE}p3" ]] && P3="${DEVICE}p3"
+
+    [[ -e "${DEVICE}p4" ]] && P4="${DEVICE}p4"
+
+
+
+    info "Formatage ${P1} → FAT32 (NEXUS-BOOT)"
+
+    mkfs.vfat -F 32 -n "NEXUS-BOOT" "${P1}"
+
+
+
+    info "Formatage ${P2} → ext4 (NEXUS-NIXOS)"
+
+    mkfs.ext4 -L "NEXUS-NIXOS" "${P2}" -q
+
+
+
+    info "Formatage ${P3} → ext4 (NEXUS-ARCH)"
+
+    mkfs.ext4 -L "NEXUS-ARCH" "${P3}" -q
+
+
+
+    info "Formatage ${P4} → ext4 (NEXUS-DATA)"
+
+    mkfs.ext4 -L "NEXUS-DATA" "${P4}" -q
+
+
+
+    info "Clé USB partitionnée :"
+
+    info "  ${P1} → FAT32  (boot GRUB)"
+
+    info "  ${P2} → ext4   (NixOS)"
+
+    info "  ${P3} → ext4   (Arch)"
+
+    info "  ${P4} → ext4   (data persistant)"
+
+
+
+    # Sauvegarder les noms de partitions
+
+    cat > "${WORK_DIR}/usb_devices.env" <<EOF
+
+DEVICE="${DEVICE}"
+
+PART_BOOT="${P1}"
+
+PART_NIXOS="${P2}"
+
+PART_ARCH="${P3}"
+
+PART_DATA="${P4}"
+
+EOF
+
+}
+
+
+
+# ═══════════════════════════════════════════════════════════════════
+
+# MONTAGE DES PARTITIONS
+
+# ═══════════════════════════════════════════════════════════════════
+
+monter_partitions() {
+
+    sec "MONTAGE DES PARTITIONS"
+
+
+
+    source "${WORK_DIR}/usb_devices.env"
+
+
+
+    mkdir -p "${USB_MNT}"/{boot,nixos,arch,data}
+
+
+
+    mount "${PART_BOOT}"  "${USB_MNT}/boot"
+
+    mount "${PART_NIXOS}" "${USB_MNT}/nixos"
+
+    mount "${PART_ARCH}"  "${USB_MNT}/arch"
+
+    mount "${PART_DATA}"  "${USB_MNT}/data"
+
+
+
+    info "Partitions montées :"
+
+    mount | grep "${USB_MNT}" || true
+
+}
+
+
+
+# ═══════════════════════════════════════════════════════════════════
+
+# INSTALLATION NIXOS
+
+# ═══════════════════════════════════════════════════════════════════
+
+installer_nixos() {
+
+    sec "INSTALLATION NIXOS SUR LA CLÉ"
+
+
+
+    local nixos_iso="${ISO_DIR}/nixos-minimal.iso"
+
+    local cible="${USB_MNT}/nixos"
+
+
+
+    info "Extraction de NixOS ISO..."
+
+    mkdir -p "${cible}"
+
+    7z x -y "${nixos_iso}" -o"${cible}" > /dev/null 2>&1 || {
+
+        # Fallback : mount + copie
+
+        local tmp_mnt="/tmp/nixos_iso_$$"
+
+        mkdir -p "${tmp_mnt}"
+
+        mount -o loop,ro "${nixos_iso}" "${tmp_mnt}"
+
+        cp -a "${tmp_mnt}"/* "${cible}/"
+
+        umount "${tmp_mnt}"
+
+        rmdir "${tmp_mnt}"
+
+    }
+
+
+
+    # Copier vmlinuz + initrd vers boot
+
+    if [[ -f "${cible}/boot/bzImage" ]]; then
+
+        cp "${cible}/boot/bzImage" "${USB_MNT}/boot/vmlinuz-nixos"
+
+    fi
+
+    if [[ -f "${cible}/boot/initrd" ]]; then
+
+        cp "${cible}/boot/initrd" "${USB_MNT}/boot/initrd-nixos"
+
+    fi
+
+
+
+    info "NixOS extrait dans ${cible}"
+
+}
+
+
+
+# ═══════════════════════════════════════════════════════════════════
+
+# INSTALLATION ARCH
+
+# ═══════════════════════════════════════════════════════════════════
+
+installer_arch() {
+
+    sec "INSTALLATION ARCH SUR LA CLÉ"
+
+
+
+    local arch_iso="${ISO_DIR}/archlinux.iso"
+
+    local cible="${USB_MNT}/arch"
+
+
+
+    info "Extraction de Arch ISO..."
+
+    mkdir -p "${cible}"
+
+    7z x -y "${arch_iso}" -o"${cible}" > /dev/null 2>&1 || {
+
+        local tmp_mnt="/tmp/arch_iso_$$"
+
+        mkdir -p "${tmp_mnt}"
+
+        mount -o loop,ro "${arch_iso}" "${tmp_mnt}"
+
+        cp -a "${tmp_mnt}"/* "${cible}/"
+
+        umount "${tmp_mnt}"
+
+        rmdir "${tmp_mnt}"
+
+    }
+
+
+
+    # Copier vmlinuz + initramfs vers boot
+
+    if [[ -f "${cible}/arch/boot/x86_64/vmlinuz-linux" ]]; then
+
+        cp "${cible}/arch/boot/x86_64/vmlinuz-linux" "${USB_MNT}/boot/vmlinuz-arch"
+
+    fi
+
+    if [[ -f "${cible}/arch/boot/x86_64/initramfs-linux.img" ]]; then
+
+        cp "${cible}/arch/boot/x86_64/initramfs-linux.img" "${USB_MNT}/boot/initramfs-arch.img"
+
+    fi
+
+
+
+    info "Arch extrait dans ${cible}"
+
+}
+
+
+
+# ═══════════════════════════════════════════════════════════════════
+
+# INSTALLATION GRUB + CONFIGURATION MARIAGE
+
+# ═══════════════════════════════════════════════════════════════════
+
+installer_grub() {
+
+    sec "INSTALLATION GRUB — MENU NEXUS FUSION"
+
+
+
+    source "${WORK_DIR}/usb_devices.env"
+
+
+
+    # Installer GRUB UEFI
+
+    info "Installation GRUB en mode UEFI..."
+
+    grub-install \
+
+        --target=x86_64-efi \
+
+        --efi-directory="${USB_MNT}/boot" \
+
+        --boot-directory="${USB_MNT}/boot" \
+
+        --removable \
+
+        --no-nvram \
+
+        2>&1 | grep -v "warning" || true
+
+
+
+    # Installer GRUB BIOS (compatibilité legacy)
+
+    if command -v grub-install >/dev/null 2>&1; then
+
+        info "Installation GRUB en mode BIOS (compatibilité)..."
+
+        grub-install \
+
+            --target=i386-pc \
+
+            --boot-directory="${USB_MNT}/boot" \
+
+            --recheck \
+
+            "${DEVICE}" 2>&1 | grep -v "warning" || true
+
+    fi
+
+
+
+    # Créer le menu GRUB personnalisé NEXUS
+
+    local grub_cfg="${USB_MNT}/boot/grub/grub.cfg"
+
+    mkdir -p "${USB_MNT}/boot/grub"
+
+
+
+    cat > "${grub_cfg}" <<'GRUBEOF'
+
+# ═══════════════════════════════════════════════════════════════════
+
+# NEXUS OS — Menu de démarrage fusion NixOS × Arch
+
+# Auteur : Aissa Mohammedi (DGK)
+
+# ═══════════════════════════════════════════════════════════════════
+
+
+
+set timeout=30
+
+set default=0
+
+set gfxmode=1920x1080
+
+set gfxpayload=keep
+
+
+
+# Charger modules
+
+insmod all_video
+
+insmod gfxterm
+
+insmod png
+
+insmod part_gpt
+
+insmod part_msdos
+
+insmod fat
+
+insmod ext2
+
+insmod linux
+
+insmod loopback
+
+insmod iso9660
+
+
+
+terminal_output gfxterm
+
+
+
+# Couleurs NEXUS
+
+set color_normal=light-cyan/black
+
+set color_highlight=black/light-cyan
+
+
+
+# ─── MENU PRINCIPAL ───
+
+menuentry "❄⚡ NEXUS OS — Fusion NixOS × Arch" --class nexus {
+
+    echo "Démarrage du menu Nexus..."
+
+    sleep 1
+
+    configfile ${prefix}/grub-nexus.cfg
+
+}
+
+
+
+menuentry "❄  NixOS 24.05 (Uakari)" --class nixos {
+
+    set root=(hd0,gpt1)
+
+    linux /vmlinuz-nixos init=/nix/store/init root=LABEL=NEXUS-DATA loglevel=4
+
+    initrd /initrd-nixos
+
+}
+
+
+
+menuentry "⚡  Arch Linux (Rolling)" --class arch {
+
+    set root=(hd0,gpt1)
+
+    linux /vmlinuz-arch archisobasedir=arch archisolabel=NEXUS-ARCH
+
+    initrd /initramfs-arch.img
+
+}
+
+
+
+menuentry "❄⚡  NEXUS OS — Fusion déclarative + rolling" --class fusion {
+
+    echo "Chargement de la fusion NixOS × Arch..."
+
+    set root=(hd0,gpt1)
+
+    linux /vmlinuz-nixos \
+
+        init=/nix/store/init \
+
+        root=LABEL=NEXUS-DATA \
+
+        nexus.arch.enable=1 \
+
+        nexus.aur.enable=1 \
+
+        nexus.fusion=1 \
+
+        loglevel=4
+
+    initrd /initrd-nixos
+
+}
+
+
+
+menuentry "🧬  NEXUS Rescue Mode" --class rescue {
+
+    set root=(hd0,gpt1)
+
+    linux /vinuz-nixos \
+
+        init=/nix/store/init \
+
+        root=LABEL=NEXUS-DATA \
+
+        rescue=1 \
+
+        single
+
+    initrd /initrd-nixos
+
+}
+
+
+
+menuentry "💾  Boot depuis disque local" --class local {
+
+    set root=(hd1)
+
+    chainloader +1
+
+}
+
+
+
+menuentry "🔌  Éteindre" --class shutdown {
+
+    halt
+
+}
+
+
+
+menuentry "🔄  Redémarrer" --class restart {
+
+    reboot
+
+}
+
+GRUBEOF
+
+
+
+    info "GRUB installé sur ${DEVICE}"
+
+    info "Configuration écrite : ${grub_cfg}"
+
+
+
+    # Détecter automatiquement les autres OS installés
+
+    if command -v os-prober >/dev/null 2>&1; then
+
+        info "Détection des autres OS..."
+
+        os-prober >> "${grub_cfg}" 2>/dev/null || true
+
+    fi
+
+}
+
+
+
+# ═══════════════════════════════════════════════════════════════════
+
+# CONFIGURATION PERSISTANCE
+
+# ═══════════════════════════════════════════════════════════════════
+
+configurer_persistance() {
+
+    sec "CONFIGURATION PERSISTANCE"
+
+
+
+    local data_dir="${USB_MNT}/data"
+
+
+
+    # Structure de persistance
+
+    mkdir -p "${data_dir}"/{nixos,arch,home/{user,nixos,arch},config}
+
+
+
+    # Fichier d'identification
+
+    cat > "${data_dir}/NEXUS_IDENTITY.txt" <<EOF
+
+═══════════════════════════════════════════════════════════════════
+
+❄⚡ NEXUS OS — Clé USB Bootable Fusion
+
+═══════════════════════════════════════════════════════════════════
+
+
+
+Auteur   : Aissa Mohammedi (DGK)
+
+Créé le  : $(date -Iseconds)
+
+Device   : ${DEVICE}
+
+Version  : 1.0.0
+
+
+
+Contenu :
+
+  ❄  NixOS 24.05 (Uakari)      → déclaratif, reproductible
+
+  ⚡  Arch Linux Rolling         → minimaliste, AUR
+
+  🔮  Fusion Nexus                → les deux mariés
+
+
+
+Démarrage :
+
+  1. Insérer la clé USB
+
+  2. Redémarrer l'ordinateur
+
+  3. Boot menu (F12/F2/ESC selon la marque)
+
+  4. Sélectionner la clé USB
+
+  5. Menu GRUB Nexus apparaît → choisir l'OS
+
+
+
+Raccourcis GRUB :
+
+  ❄⚡ Fusion Nexus    → L'OS complet marié
+
+  ❄  NixOS            → NixOS seul
+
+  ⚡  Arch            → Arch seul
+
+  🧬  Rescue          → Mode récupération
+
+  💾  Local           → Boot du disque interne
+
+
+
+Persistance :
+
+  /data/home/user/    → Ton dossier perso
+
+  /data/config/       → Configurations
+
+  /data/nixos/        → Config NixOS
+
+  /data/arch/         → Config Arch
+
+
+
+═══════════════════════════════════════════════════════════════════
+
+EOF
+
+
+
+    # Config NixOS
+
+    cat > "${data_dir}/config/configuration.nix" <<'NIXEOF'
+
+# NEXUS OS — configuration.nix
+
+# Fusion NixOS × Arch Linux
+
+{ config, pkgs, ... }:
+
+
+
+{
+
+  imports = [
+
+    ./hardware-configuration.nix
+
+    ./nexus-fusion.nix
+
+  ];
+
+
+
+  system.stateVersion = "24.05";
+
+
+
+  # Utilisateur Nexus
+
+  users.users.nexus = {
+
+    isNormalUser = true;
+
+    extraGroups = [ "wheel" "networkmanager" "video" "audio" ];
+
+    initialPassword = "nexus";
+
+  };
+
+
+
+  # Fusion Arch
+
+  nexus.arch.enable = true;
+
+  nexus.arch.aur = true;
+
+  nexus.fusion = true;
+
+
+
+  # Environnement bureau
+
+  services.xserver = {
+
+    enable = true;
+
+    displayManager.gdm.enable = true;
+
+    desktopManager.gnome.enable = true;
+
+  };
+
+
+
+  # Réseau
+
+  networking.hostName = "nexus";
+
+  networking.networkmanager.enable = true;
+
+
+
+  # Paquets
+
+  environment.systemPackages = with pkgs; [
+
+    firefox alacritty vscode git neofetch htop
+
+    vim tmux curl wget
+
+  ];
+
+
+
+  # Nix Flakes
+
+  nix.settings.experimental-features = [ "nix-command" "flakes" ];
+
+  nix.gc = {
+
+    automatic = true;
+
+    dates = "weekly";
+
+    options = "--delete-older-than 30d";
+
+  };
+
+}
+
+NIXEOF
+
+
+
+    # Config Arch
+
+    cat > "${data_dir}/config/pacman.conf.nexus" <<'ARCHEOF'
+
+# NEXUS OS — pacman.conf
+
+[options]
+
+HoldPkg = pacman glibc
+
+Architecture = auto
+
+Color
+
+CheckSpace
+
+ParallelDownloads = 5
+
+SigLevel = Required DatabaseOptional
+
+
+
+[core]
+
+Include = /etc/pacman.d/mirrorlist
+
+
+
+[extra]
+
+Include = /etc/pacman.d/mirrorlist
+
+
+
+[multilib]
+
+Include = /etc/pacman.d/mirrorlist
+
+
+
+[nexus]
+
+SigLevel = Optional TrustAll
+
+Server = file:///data/arch/nexus-repo/$arch
+
+ARCHEOF
+
+
+
+    info "Persistance configurée : ${data_dir}"
+
+}
+
+
+
+# ═══════════════════════════════════════════════════════════════════
+
+# SYNCHRONISATION + DÉMONTAGE
+
+# ═══════════════════════════════════════════════════════════════════
+
+finaliser() {
+
+    sec "FINALISATION"
+
+
+
+    info "Synchronisation des écritures..."
+
+    sync
+
+    sleep 2
+
+
+
+    info "Démontage des partitions..."
+
+    umount "${USB_MNT}/boot"  2>/dev/null || true
+
+    umount "${USB_MNT}/nixos" 2>/dev/null || true
+
+    umount "${USB_MNT}/arch"  2>/dev/null || true
+
+    umount "${USB_MNT}/data"  2>/dev/null || true
+
+
+
+    rmdir "${USB_MNT}"/* 2>/dev/null || true
+
+    rmdir "${USB_MNT}"   2>/dev/null || true
+
+
+
+    info "Clé USB prête à être retirée"
+
+}
+
+
+
+# ═══════════════════════════════════════════════════════════════════
+
+# RÉCAPITULATIF FINAL
+
+# ═══════════════════════════════════════════════════════════════════
+
+recapitulatif() {
+
+    sec "✅ CLÉ USB NEXUS CRÉÉE AVEC SUCCÈS"
+
+
+
+    cat <<EOF
+
+
+
+${G}${B}═══════════════════════════════════════════════════════════════════════
+
+        ❄⚡ NEXUS OS — Clé USB Bootable Fusion
+
+═══════════════════════════════════════════════════════════════════════${N}
+
+
+
+  Device utilisé  : ${DEVICE}
+
+
+
+  ${C}Partitions créées :${N}
+
+    ${G}${PART_BOOT}${N}  → FAT32  — NEXUS-BOOT   (2 GB, boot GRUB)
+
+    ${G}${PART_NIXOS}${N} → ext4   — NEXUS-NIXOS  (8 GB, système NixOS)
+
+    ${G}${PART_ARCH}${N}  → ext4   — NEXUS-ARCH   (8 GB, système Arch)
+
+    ${G}${PART_DATA}${N}  → ext4   — NEXUS-DATA   (reste, persistance)
+
+
+
+  ${M}Menu GRUB NEXUS :${N}
+
+    ❄⚡  Fusion NixOS × Arch   (recommandé)
+
+    ❄   NixOS 24.05
+
+    ⚡   Arch Linux Rolling
+
+    🧬   Rescue Mode
+
+    💾   Boot disque local
+
+    🔌   Éteindre
+
+    🔄   Redémarrer
+
+
+
+  ${M}Comment démarrer :${N}
+
+    1. Insérer la clé USB dans le PC cible
+
+    2. Redémarrer le PC
+
+    3. Appuyer sur F12/F2/ESC/DEL selon la marque
+
+    4. Choisir "USB" dans le menu de boot
+
+    5. Le menu GRUB NEXUS apparaît
+
+    6. Choisir ❄⚡ Fusion pour l'expérience complète
+
+
+
+  ${M}Fichiers :${N}
+
+    Log de build     : ${LOG_FILE}
+
+    ISOs téléchargés : ${ISO_DIR}
+
+    Config USB       : ${WORK_DIR}/usb_devices.env
+
+
+
+${G}${B}═══════════════════════════════════════════════════════════════════════
+
+        Forgeron Suprême · Aissa Mohammedi (DGK) · 2026
+
+═══════════════════════════════════════════════════════════════════════${N}
+
+
+
+EOF
+
+}
+
+
+
+# ═══════════════════════════════════════════════════════════════════
+
+# MAIN
+
+# ═══════════════════════════════════════════════════════════════════
+
+main() {
+
+    banniere
+
+    verifier_root
+
+    verifier_outils
+
+    choisir_device
+
+    telecharger_isos
+
+    formater_usb
+
+    monter_partitions
+
+    installer_nixos
+
+    installer_arch
+
+    installer_grub
+
+    configurer_persistance
+
+    finaliser
+
+
+
+    source "${WORK_DIR}/usb_devices.env"
+
+    recapitulatif
+
+}
+
+
+
+main "$@"
