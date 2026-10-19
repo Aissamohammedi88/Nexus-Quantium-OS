@@ -1,0 +1,25 @@
+nexus-os/
+├── README.md
+├── LICENSE                  # MIT pour tes scripts
+├── THIRD-PARTY.md           # licences des composants embarqués
+├── SECURITY.md
+├── CONTRIBUTING.md
+├── versions.env             # versions épinglées, source unique de vérité
+├── .gitignore
+├── .editorconfig
+├── .github/
+│   └── workflows/
+│       ├── lint.yml
+│       └── release.yml
+├── scripts/
+│   ├── 01-prepare-host.sh
+│   ├── ...
+│   └── 09-test-qemu.sh
+├── tools/
+│   ├── verify-manifest.sh
+│   └── make-manifest.sh
+├── docs/
+│   ├── build.md
+│   ├── troubleshooting.md
+│   └── legal.md
+└── build/                   # ignoré
