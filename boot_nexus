@@ -1,0 +1,241 @@
+# 4.1 Vérifier que la partition est montée
+if ! mountpoint -q "$NEXUS_ROOT"; then
+echo "Monte d'abord ta partition cible sur $NEXUS_ROOT"
+exit 1
+fi
+
+# 4.2 Créer l'arborescence FHS minimale
+mkdir -pv "$NEXUS_ROOT"/{etc,var,usr,bin,lib,sbin,tmp,home,root,opt,proc,sys,dev,run}
+mkdir -pv "$NEXUS_ROOT"/usr/{bin,lib,sbin,include,share}
+mkdir -pv "$NEXUS_ROOT"/var/{log,lib,tmp}
+ln -sv usr/bin "$NEXUS_ROOT/bin"
+ln -sv usr/lib "$NEXUS_ROOT/lib"
+ln -sv usr/sbin "$NEXUS_ROOT/sbin"
+chmod 1777 "$NEXUS_ROOT/tmp"
+
+# 4.3 Créer l'utilisateur lfs pour la phase chroot
+groupadd -f lfs || true
+useradd -s /bin/bash -g lfs -m -k /dev/null lfs 2>/dev/null || true
+chown -v lfs:lfs "$NEXUS_ROOT"
+chown -v lfs:lfs "$LFS"
+
+# 4.4 Passer la main à l'utilisateur lfs
+echo "[INFO] La suite doit être exécutée en tant qu'utilisateur 'lfs'."
+echo " Suis les chapitres 5 à 8 du manuel LFS-BOOK.pdf."
+echo " Chaque paquet = ./configure + make + make install, dans l'ordre."
+echo "[OK] Arborescence préparée."
+```
+
+---
+
+05-kernel-drivers.sh — Noyau + drivers stables
+
+```bash
+#!/usr/bin/env bash
+# 05-kernel-drivers.sh — configure et compile le noyau avec drivers stables
+set -euo pipefail
+
+LFS="$HOME/nexus-build/build"
+NEXUS_ROOT="/mnt/nexus"
+KERNEL_VERSION="6.10.6" # adapte à la version LFS courante
+SRC="$LFS/sources/linux-${KERNEL_VERSION}.tar.xz"
+
+echo "=== [5/9] Compilation noyau + drivers ==="
+
+cd "$LFS/sources"
+[[ -d "linux-${KERNEL_VERSION}" ]] || tar -xf "$SRC"
+cd "linux-${KERNEL_VERSION}"
+
+# 5.1 Configuration de base (stable, drivers courants)
+make mrproper
+make defconfig
+
+# 5.2 Activer les familles de drivers pour stabilité large
+scripts/config --enable CONFIG_EXT4_FS
+scripts/config --enable CONFIG_VFAT_FS
+scripts/config --enable CONFIG_TMPFS
+scripts/config --enable CONFIG_NETDEVICES
+scripts/config --enable CONFIG_E1000
+scripts/config --enable CONFIG_E1000E
+scripts/config --enable CONFIG_USB_SUPPORT
+scripts/config --enable CONFIG_USB_STORAGE
+scripts/config --enable CONFIG_INPUT_EVDEV
+scripts/config --enable CONFIG_SND
+
+make olddefconfig
+
+# 5.3 Compilation
+make -j"$(nproc)"
+make modules_install INSTALL_MOD_PATH="$NEXUS_ROOT"
+make install INSTALL_PATH="$NEXUS_ROOT/boot"
+
+echo "[OK] Noyau installé dans $NEXUS_ROOT/boot"
+echo " Modules dans $NEXUS_ROOT/lib/modules/"
+```
+
+---
+
+06-nexus-layer.sh — Couche Nexus OS + Omega API
+
+```bash
+#!/usr/bin/env bash
+# 06-nexus-layer.sh — ajoute branding Nexus, services systemd, Omega API
+set -euo pipefail
+
+NEXUS_ROOT="/mnt/nexus"
+
+echo "=== [6/9] Couche Nexus OS ==="
+
+# 6.1 Branding
+echo "Nexus OS 1.0" > "$NEXUS_ROOT/etc/nexus-release"
+cat > "$NEXUS_ROOT/etc/os-release" <<'EOF'
+NAME="Nexus OS"
+ID=nexus
+VERSION="1.0"
+PRETTY_NAME="Nexus OS 1.0 (Omega)"
+HOME_URL="https://nexus.local"
+EOF
+
+# 6.2 Dossier Omega
+mkdir -p "$NEXUS_ROOT/opt/nexus/omega"
+# Copie ton script APIOmega dans cet emplacement :
+cp /chemin/vers/resonance_core.py "$NEXUS_ROOT/opt/nexus/omega/resonance_core.py" || true
+
+# 6.3 Service systemd Omega
+cat > "$NEXUS_ROOT/etc/systemd/system/nexus-omega.service" <<'EOF'
+[Unit]
+Description=Nexus OS Cognitive Resonance Core (Omega API)
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /opt/nexus/omega/resonance_core.py
+Restart=on-failure
+RestartSec=5
+User=nexus
+Group=nexus
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# 6.4 Utilisateur nexus dédié
+echo "nexus:x:1500:1500:Nexus Service:/opt/nexus:/sbin/nologin" >> "$NEXUS_ROOT/etc/passwd"
+echo "nexus:x:1500:" >> "$NEXUS_ROOT/etc/group"
+
+# 6.5 Activation
+ln -sf /etc/systemd/system/nexus-omega.service \
+"$NEXUS_ROOT/etc/systemd/system/multi-user.target.wants/nexus-omega.service"
+
+echo "[OK] Couche Nexus OS installée."
+```
+
+---
+
+07-bootloader.sh — Rendre bootable
+
+```bash
+#!/usr/bin/env bash
+# 07-bootloader.sh — installe GRUB sur le disque cible
+set -euo pipefail
+
+NEXUS_ROOT="/mnt/nexus"
+DISK="/dev/sdX" # ⚠️ REMPLACE par ton disque cible (ex: /dev/sda)
+
+echo "=== [7/9] Installation du bootloader sur $DISK ==="
+
+# 7.1 Monter les pseudo-systèmes pour chroot
+mount --bind /dev "$NEXUS_ROOT/dev"
+mount --bind /proc "$NEXUS_ROOT/proc"
+mount --bind /sys "$NEXUS_ROOT/sys"
+
+# 7.2 Installer GRUB dans le chroot
+chroot "$NEXUS_ROOT" /bin/bash -c "
+grub-install --target=i386-pc $DISK &&
+grub-mkconfig -o /boot/grub/grub.cfg
+"
+
+# 7.3 Démonter proprement
+umount "$NEXUS_ROOT/dev" "$NEXUS_ROOT/proc" "$NEXUS_ROOT/sys"
+
+echo "[OK] Système bootable sur $DISK."
+```
+
+---
+
+08-package-iso.sh — Générer l’ISO Nexus OS
+
+```bash
+#!/usr/bin/env bash
+# 08-package-iso.sh — packager Nexus OS en ISO bootable
+set -euo pipefail
+
+NEXUS_ROOT="/mnt/nexus"
+OUT="$HOME/nexus-build/iso"
+mkdir -p "$OUT"/{boot/grub,isolinux,Nexus}
+
+echo "=== [8/9] Packaging ISO ==="
+
+# 8.1 Copier noyau + initrd
+cp "$NEXUS_ROOT/boot/vmlinuz"* "$OUT/boot/" || true
+cp "$NEXUS_ROOT/boot/initrd"* "$OUT/boot/" || true
+
+# 8.2 Créer le rootfs squashfs
+mksquashfs "$NEXUS_ROOT" "$OUT/Nexus/rootfs.squashfs" -comp xz -noappend
+
+# 8.3 Config GRUB pour l'ISO
+cat > "$OUT/boot/grub/grub.cfg" <<'EOF'
+set default=0
+set timeout=5
+menuentry "Nexus OS 1.0 (Omega)" {
+linux /boot/vmlinuz root=/dev/ram0 rw quiet
+initrd /boot/initrd.img
+}
+EOF
+
+# 8.4 Construire l'ISO
+grub-mkrescue -o "$OUT/nexus-os.iso" "$OUT"
+
+echo "[OK] ISO générée : $OUT/nexus-os.iso"
+```
+
+---
+
+09-test-qemu.sh — Test VM avant disque réel
+
+```bash
+#!/usr/bin/env bash
+# 09-test-qemu.sh — boote l'ISO Nexus OS dans QEMU
+set -euo pipefail
+
+ISO="$HOME/nexus-build/iso/nexus-os.iso"
+
+echo "=== [9/9] Test QEMU ==="
+qemu-system-x86_64 \
+-m 4096 \
+-smp 4 \
+-cdrom "$ISO" \
+-boot d \
+-enable-kvm \
+-netdev user,id=net0 -device e1000,netdev=net0
+
+echo "[OK] Si le système boote en VM, tu peux flasher sur disque réel."
+```
+
+---
+
+Ordre d’exécution
+
+```bash
+sudo ./01-prepare-host.sh
+./02-get-lfs.sh
+./03-download-sources.sh
+sudo ./04-build-base.sh # long — suivre le manuel LFS en parallèle
+sudo ./05-kernel-drivers.sh
+sudo ./06-nexus-layer.sh
+sudo ./07-bootloader.sh # ⚠️ remplace /dev/sdX
+./08-package-iso.sh
+./09-test-qemu.sh
+```
+
+---
