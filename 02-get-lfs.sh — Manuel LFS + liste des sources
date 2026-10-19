@@ -1,0 +1,21 @@
+```bash
+#!/usr/bin/env bash
+# 02-get-lfs.sh — récupère le manuel LFS et la liste officielle des paquets
+set -euo pipefail
+
+WORKDIR="$HOME/nexus-build"
+mkdir -p "$WORKDIR"/{sources,manual,build}
+cd "$WORKDIR"
+
+echo "=== [2/9] Récupération du manuel LFS ==="
+
+LFS_VERSION="12.2"
+BASE_URL="https://www.linuxfromscratch.org/lfs/downloads/${LFS_VERSION}"
+
+wget -c "$BASE_URL/LFS-BOOK.pdf" -O manual/LFS-BOOK.pdf
+wget -c "$BASE_URL/wget-list-systemd" -O sources/wget-list
+wget -c "$BASE_URL/md5sums" -O sources/md5sums
+
+echo "[OK] Manuel + listes dans $WORKDIR"
+echo " Lis le PDF : manual/LFS-BOOK.pdf"
+```
