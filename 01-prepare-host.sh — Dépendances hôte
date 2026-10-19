@@ -1,0 +1,23 @@
+```bash
+#!/usr/bin/env bash
+# 01-prepare-host.sh — installe les dépendances pour construire Nexus OS
+set -euo pipefail
+
+echo "=== [1/9] Préparation de l'hôte ==="
+
+if [[ $EUID -ne 0 ]]; then
+echo "Ce script doit être lancé en root (sudo ./01-prepare-host.sh)"
+exit 1
+fi
+
+apt update
+apt install -y \
+build-essential bison flex gawk texinfo \
+libncurses-dev libssl-dev libelf-dev \
+wget curl git rsync \
+xorriso squashfs-tools mtools dosfstools \
+qemu-system-x86 qemu-utils \
+parted gdisk kmod cpio
+
+echo "[OK] Dépendances installées."
+```
