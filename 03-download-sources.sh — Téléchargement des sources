@@ -1,0 +1,19 @@
+```bash
+#!/usr/bin/env bash
+# 03-download-sources.sh — télécharge tous les tarballs LFS
+set -euo pipefail
+
+WORKDIR="$HOME/nexus-build"
+cd "$WORKDIR/sources"
+
+echo "=== [3/9] Téléchargement des sources ==="
+
+mkdir -p packages
+cd packages
+wget -c -i ../wget-list
+cd ..
+
+# Vérification md5 optionnelle
+echo "[OK] Sources téléchargées dans $WORKDIR/sources/packages"
+echo " Vérification md5 disponible via: md5sum -c md5sums (à compléter)"
+```
