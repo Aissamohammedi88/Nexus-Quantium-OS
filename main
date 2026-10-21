@@ -1,0 +1,624 @@
+
+0. Arborescence cible sur ton OS
+
+```bash
+sudo mkdir -p /opt/nexus/{core,brain,mesh,exec,logs,config}
+sudo chown -R $USER:$USER /opt/nexus
+```
+
+```
+/opt/nexus/
+├── core/ # Rust daemon
+├── brain/ # Python FastAPI
+├── mesh/ # Go orchestrator
+├── exec/ # Bash exec
+├── logs/ # audit
+└── config/ # configs
+```
+
+---
+
+1. Schéma SQL (base nexus_agents)
+
+```sql
+-- /opt/nexus/config/schema.sql
+CREATE DATABASE IF NOT EXISTS nexus_agents
+CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+
+USE nexus_agents;
+
+CREATE TABLE IF NOT EXISTS signals (
+id BIGINT AUTO_INCREMENT PRIMARY KEY,
+source VARCHAR(64) NOT NULL,
+payload JSON NOT NULL,
+created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+INDEX idx_source_time (source, created_at)
+);
+
+CREATE TABLE IF NOT EXISTS decisions (
+id BIGINT AUTO_INCREMENT PRIMARY KEY,
+signal_id BIGINT,
+agent VARCHAR(64) NOT NULL,
+intention VARCHAR(128),
+action VARCHAR(64),
+target VARCHAR(255),
+reason TEXT,
+confidence FLOAT,
+approved BOOLEAN DEFAULT FALSE,
+created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+FOREIGN KEY (signal_id) REFERENCES signals(id) ON DELETE SET NULL,
+INDEX idx_agent_time (agent, created_at)
+);
+
+CREATE TABLE IF NOT EXISTS actions (
+id BIGINT AUTO_INCREMENT PRIMARY KEY,
+decision_id BIGINT,
+command TEXT NOT NULL,
+exit_code INT,
+stdout TEXT,
+stderr TEXT,
+duration_ms INT,
+executed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+FOREIGN KEY (decision_id) REFERENCES decisions(id) ON DELETE SET NULL,
+INDEX idx_exec_time (executed_at)
+);
+
+CREATE TABLE IF NOT EXISTS agents_heartbeat (
+agent VARCHAR(64) PRIMARY KEY,
+last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+version VARCHAR(32),
+status VARCHAR(32) DEFAULT 'alive'
+);
+```
+
+```bash
+mysql -u root -p < /opt/nexus/config/schema.sql
+```
+
+---
+
+2. Core Agent — Rust
+
+Cargo.toml
+
+```toml
+# /opt/nexus/core/Cargo.toml
+[package]
+name = "nexus-core"
+version = "1.0.0"
+edition = "2021"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+reqwest = { version = "0.12", features = ["json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sysinfo = "0.32"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+```
+
+src/main.rs
+
+```rust
+// /opt/nexus/core/src/main.rs
+use serde::{Deserialize, Serialize};
+use std::time::Duration;
+use sysinfo::System;
+use tokio::time::sleep;
+
+#[derive(Serialize, Deserialize, Debug)]
+struct Signal {
+source: String,
+payload: serde_json::Value,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct Decision {
+action: String,
+target: String,
+reason: String,
+confidence: f32,
+approved: bool,
+}
+
+const BRAIN_URL: &str = "http://127.0.0.1:8000/decide";
+const EXEC_BIN: &str = "/opt/nexus/exec/nexus-exec.sh";
+
+async fn collect_system() -> serde_json::Value {
+let mut sys = System::new_all();
+sys.refresh_all();
+serde_json::json!({
+"cpu_count": sys.cpus().len(),
+"cpu_usage_avg": sys.cpus().iter().map(|c| c.cpu_usage()).sum::<f32>() / sys.cpus().len() as f32,
+"mem_total_mb": sys.total_memory() / 1024 / 1024,
+"mem_used_mb": sys.used_memory() / 1024 / 1024,
+"uptime_s": System::uptime(),
+})
+}
+
+async fn send_to_brain(client: &reqwest::Client, signal: &Signal) -> Option<Decision> {
+match client.post(BRAIN_URL).json(signal).send().await {
+Ok(resp) => resp.json::<Decision>().await.ok(),
+Err(e) => { tracing::warn!("brain unreachable: {e}"); None }
+}
+}
+
+async fn exec_decision(decision: &Decision) {
+if !decision.approved {
+tracing::info!("decision non approuvée, skip: {:?}", decision);
+return;
+}
+let order = serde_json::json!({
+"action": decision.action,
+"target": decision.target
+});
+match tokio::process::Command::new(EXEC_BIN)
+.arg(order.to_string())
+.output()
+.await
+{
+Ok(out) => tracing::info!(
+"exec: {:?} | code={:?}",
+decision.action,
+out.status.code()
+),
+Err(e) => tracing::error!("exec fail: {e}"),
+}
+}
+
+#[tokio::main]
+async fn main() {
+tracing_subscriber::fmt::init();
+tracing::info!("Nexus Core Agent starting");
+
+let client = reqwest::Client::builder()
+.timeout(Duration::from_secs(5))
+.build()
+.expect("http client");
+
+loop {
+let sys = collect_system().await;
+let signal = Signal {
+source: "core".into(),
+payload: sys,
+};
+tracing::debug!("signal: {:?}", signal);
+
+if let Some(decision) = send_to_brain(&client, &signal).await {
+tracing::info!("decision: {:?}", decision);
+exec_decision(&decision).await;
+}
+
+sleep(Duration::from_secs(10)).await;
+}
+}
+```
+
+Build
+
+```bash
+cd /opt/nexus/core
+cargo build --release
+sudo cp target/release/nexus-core /usr/local/bin/nexus-core
+```
+
+---
+
+3. Brain Agent — Python (FastAPI + Omega)
+
+requirements.txt
+
+```txt
+# /opt/nexus/brain/requirements.txt
+fastapi==0.115.0
+uvicorn[standard]==0.32.0
+pydantic==2.9.2
+httpx==0.27.2
+```
+
+resonance_core.py — ton API Omega (recopié)
+
+```python
+# /opt/nexus/brain/resonance_core.py
+# (ton code APIOmega complet, sans modification)
+```
+
+main.py
+
+```python
+# /opt/nexus/brain/main.py
+import json
+import logging
+from fastapi import FastAPI
+from pydantic import BaseModel
+from typing import Any, Dict
+import resonance_core
+
+logging.basicConfig(level=logging.INFO)
+log = logging.getLogger("nexus-brain")
+
+app = FastAPI(title="Nexus Brain Agent")
+omega = resonance_core.APIOmega()
+
+class Signal(BaseModel):
+source: str
+payload: Dict[str, Any]
+
+class Decision(BaseModel):
+action: str
+target: str
+reason: str
+confidence: float
+approved: bool
+
+def analyse_signal(sig: Signal) -> Decision:
+p = sig.payload
+cpu = float(p.get("cpu_usage_avg", 0))
+mem_used = float(p.get("mem_used_mb", 0))
+mem_total = max(float(p.get("mem_total_mb", 1)), 1)
+mem_pct = mem_used / mem_total * 100
+
+if cpu > 90.0:
+return Decision(
+action="warn", target="cpu",
+reason=f"CPU usage critique: {cpu:.1f}%",
+confidence=0.9, approved=True,
+)
+if mem_pct > 90.0:
+return Decision(
+action="warn", target="memory",
+reason=f"Mémoire critique: {mem_pct:.1f}%",
+confidence=0.9, approved=True,
+)
+return Decision(
+action="noop", target="system",
+reason="Système stable", confidence=0.5, approved=False,
+)
+
+@app.post("/decide", response_model=Decision)
+async def decide(sig: Signal) -> Decision:
+token = omega.generer_token("nexus-brain", sig.source)
+resp = omega.executer_requete(token, json.dumps(sig.payload))
+log.info("omega: %s", resp)
+
+d = analyse_signal(sig)
+log.info("decision: %s", d)
+return d
+
+@app.get("/health")
+async def health():
+return {"status": "ok", "agent": "nexus-brain"}
+```
+
+Lancement
+
+```bash
+cd /opt/nexus/brain
+python3 -m venv venv && source venv/bin/activate
+pip install -r requirements.txt
+uvicorn main:app --host 127.0.0.1 --port 8000
+```
+
+---
+
+4. Mesh Agent — Go
+
+go.mod
+
+```go
+// /opt/nexus/mesh/go.mod
+module nexus-mesh
+go 1.22
+```
+
+main.go
+
+```go
+// /opt/nexus/mesh/main.go
+package main
+
+import (
+"encoding/json"
+"log"
+"net/http"
+"sync"
+"time"
+)
+
+type heartbeat struct {
+Agent string `json:"agent"`
+Status string `json:"status"`
+LastSee time.Time `json:"last_seen"`
+}
+
+var (
+mu sync.Mutex
+agents = map[string]heartbeat{}
+)
+
+func register(w http.ResponseWriter, r *http.Request) {
+var hb heartbeat
+if err := json.NewDecoder(r.Body).Decode(&hb); err != nil {
+http.Error(w, "bad json", 400)
+return
+}
+hb.LastSee = time.Now()
+mu.Lock(); agents[hb.Agent] = hb; mu.Unlock()
+w.WriteHeader(200)
+_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
+func list(w http.ResponseWriter, r *http.Request) {
+mu.Lock(); defer mu.Unlock()
+_ = json.NewEncoder(w).Encode(agents)
+}
+
+func health(w http.ResponseWriter, r *http.Request) {
+_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok", "agent": "nexus-mesh"})
+}
+
+func main() {
+http.HandleFunc("/register", register)
+http.HandleFunc("/agents", list)
+http.HandleFunc("/health", health)
+log.Println("Nexus Mesh Agent on :9100")
+log.Fatal(http.ListenAndServe(":9100", nil))
+}
+```
+
+Build
+
+```bash
+cd /opt/nexus/mesh
+go build -o nexus-mesh .
+sudo cp nexus-mesh /usr/local/bin/nexus-mesh
+```
+
+---
+
+5. Exec Agent — Bash (whitelist d’actions)
+
+```bash
+#!/usr/bin/env bash
+# /opt/nexus/exec/nexus-exec.sh
+# Reçoit un JSON {"action":"...","target":"..."} et exécute UNIQUEMENT
+# les actions dans la whitelist. Logge tout dans /opt/nexus/logs/exec.log.
+set -euo pipefail
+
+LOG=/opt/nexus/logs/exec.log
+mkdir -p "$(dirname "$LOG")"
+
+ORDER="${1:-}"
+[[ -z "$ORDER" ]] && { echo "usage: $0 '<json>'"; exit 1; }
+
+ACTION=$(echo "$ORDER" | python3 -c 'import sys,json;print(json.load(sys.stdin)["action"])')
+TARGET=$(echo "$ORDER" | python3 -c 'import sys,json;print(json.load(sys.stdin)["target"])')
+
+# Whitelist stricte
+case "$ACTION" in
+warn)
+echo "$(date -Is) WARN target=$TARGET" | tee -a "$LOG"
+;;
+restart)
+case "$TARGET" in
+ssh|NetworkManager|nexus-omega|nexus-brain)
+systemctl restart "$TARGET" 2>&1 | tee -a "$LOG"
+;;
+*) echo "$(date -Is) REFUSED restart $TARGET" | tee -a "$LOG"; exit 2 ;;
+esac
+;;
+stop)
+case "$TARGET" in
+ssh|NetworkManager|nexus-omega|nexus-brain)
+systemctl stop "$TARGET" 2>&1 | tee -a "$LOG"
+;;
+*) echo "$(date -Is) REFUSED stop $TARGET" | tee -a "$LOG"; exit 2 ;;
+esac
+;;
+noop)
+echo "$(date -Is) NOOP" | tee -a "$LOG"
+;;
+*)
+echo "$(date -Is) UNKNOWN action=$ACTION" | tee -a "$LOG"; exit 3
+;;
+esac
+```
+
+```bash
+chmod +x /opt/nexus/exec/nexus-exec.sh
+```
+
+---
+
+6. Services systemd
+
+/etc/systemd/system/nexus-brain.service
+
+```ini
+[Unit]
+Description=Nexus Brain Agent (FastAPI + Omega)
+After=network.target mysql.service
+
+[Service]
+Type=simple
+User=nexus
+Group=nexus
+WorkingDirectory=/opt/nexus/brain
+ExecStart=/opt/nexus/brain/venv/bin/uvicorn main:app --host 127.0.0.1 --port 8000
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+/etc/systemd/system/nexus-mesh.service
+
+```ini
+[Unit]
+Description=Nexus Mesh Agent (Go)
+After=network.target
+
+[Service]
+Type=simple
+User=nexus
+Group=nexus
+ExecStart=/usr/local/bin/nexus-mesh
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+/etc/systemd/system/nexus-core.service
+
+```ini
+[Unit]
+Description=Nexus Core Agent (Rust)
+After=network.target nexus-brain.service
+Requires=nexus-brain.service
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/local/bin/nexus-core
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+/etc/systemd/system/nexus-omega.service (ton API Omega autonome)
+
+```ini
+[Unit]
+Description=Nexus Cognitive Resonance Core (Omega API)
+After=network.target
+
+[Service]
+Type=simple
+User=nexus
+Group=nexus
+ExecStart=/usr/bin/python3 /opt/nexus/brain/resonance_core.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Activation
+
+```bash
+sudo useradd -r -s /usr/sbin/nologin nexus 2>/dev/null || true
+sudo mkdir -p /opt/nexus/{logs,config}
+sudo chown -R nexus:nexus /opt/nexus/logs /opt/nexus/config
+
+sudo systemctl daemon-reload
+sudo systemctl enable --now nexus-omega nexus-brain nexus-mesh nexus-core
+sudo systemctl status nexus-core nexus-brain nexus-mesh nexus-omega
+```
+
+---
+
+7. Sécurité & audit (obligatoire)
+
+7.1 Capabilities minimales pour Core
+
+Édite nexus-core.service :
+
+```ini
+[Service]
+AmbientCapabilities=CAP_NET_ADMIN CAP_SYS_ADMIN
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_SYS_ADMIN
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/nexus/logs /opt/nexus/config
+```
+
+7.2 Logs centralisés
+
+```bash
+# Tous les agents loggent dans journald + fichiers séparés
+sudo journalctl -u nexus-core -u nexus-brain -u nexus-mesh -u nexus-omega -f
+```
+
+7.3 Journalisation SQL des actions
+
+Dans nexus-exec.sh, après chaque action, insère dans actions. Exemple minimal :
+
+```bash
+mysql -u nexus_agent -p"$NEXUS_DB_PASS" nexus_agents -e "
+INSERT INTO actions (command, exit_code, executed_at)
+VALUES ('$ACTION $TARGET', 0, NOW());"
+```
+
+(Crée un user MySQL dédié nexus_agent avec droit INSERT seul sur actions, jamais root.)
+
+7.4 Mode "suggestion" par défaut
+
+Tant que tu n’as pas validé la stabilité : dans main.py, renvoie approved=False partout sauf actions warn/noop. Le Core n’exécutera rien de destructif.
+
+---
+
+8. Test end-to-end
+
+```bash
+# 1) Brain seul
+curl -X POST http://127.0.0.1:8000/decide \
+-H 'Content-Type: application/json' \
+-d '{"source":"manual","payload":{"cpu_usage_avg":95,"mem_used_mb":1000,"mem_total_mb":8000}}'
+# → {"action":"warn","target":"cpu",...}
+
+# 2) Mesh
+curl http://127.0.0.1:9100/health
+curl http://127.0.0.1:9100/agents
+
+# 3) Core (voir logs)
+sudo journalctl -u nexus-core -f
+
+# 4) Exec (manuel)
+/opt/nexus/exec/nexus-exec.sh '{"action":"warn","target":"cpu"}'
+/opt/nexus/exec/nexus-exec.sh '{"action":"restart","target":"ssh"}'
+/opt/nexus/exec/nexus-exec.sh '{"action":"restart","target":"postgres"}' # → REFUSED
+```
+
+---
+
+9. Ordre d’installation sur ton OS déjà installé
+
+```bash
+# 1) Base SQL
+mysql -u root -p < /opt/nexus/config/schema.sql
+mysql -u root -p -e "CREATE USER 'nexus_agent'@'localhost' IDENTIFIED BY 'CHANGE_ME'; GRANT INSERT,SELECT ON nexus_agents.* TO 'nexus_agent'@'localhost'; FLUSH PRIVILEGES;"
+
+# 2) Rust
+cd /opt/nexus/core && cargo build --release && sudo cp target/release/nexus-core /usr/local/bin/
+
+# 3) Python
+cd /opt/nexus/brain && python3 -m venv venv && source venv/bin/activate && pip install -r requirements.txt
+
+# 4) Go
+cd /opt/nexus/mesh && go build -o nexus-mesh . && sudo cp nexus-mesh /usr/local/bin/
+
+# 5) Exec
+chmod +x /opt/nexus/exec/nexus-exec.sh
+
+# 6) systemd
+sudo systemctl daemon-reload
+sudo systemctl enable --now nexus-omega nexus-brain nexus-mesh nexus-core
+```
+
+---
+
+10. Points d’honnêteté
+
+1. user=root pour Core : nécessaire pour lire /proc largement et lancer systemctl. Si tu veux durcir davantage, baisse à nexus + capabilities ciblées (déjà montré §7.1).
+2. Whitelist Exec : ajoute des actions au compte-gouttes, jamais de shell générique construit depuis du texte libre.
+3. approved : commence par tout en False, observe les décisions dans les logs pendant 1–2 semaines, puis active les actions que tu valides.
+4. SQL : le nexus_agent MySQL n’a que INSERT/SELECT, pas DROP/DELETE.
+5. Teste chaque agent isolément avant d’activer le suivant — sinon un agent qui boucle peut saturer ton système.
